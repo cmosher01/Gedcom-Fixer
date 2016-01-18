@@ -1,0 +1,25 @@
+group 'nu.mine.mosher.gedcom'
+version '1.0.0-SNAPSHOT'
+
+apply plugin: 'java'
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'nu.mine.mosher.gedcom.Gedcom'
+    }
+}
+
+sourceCompatibility = 1.8
+
+repositories {
+    maven {
+        url 'http://mosher.mine.nu/maven'
+    }
+}
+
+dependencies {
+    compile group: 'nu.mine.mosher.gedcom', name: 'gedcom-lib', version: 'latest.integration'
+
+    testCompile group: 'junit', name: 'junit', version: 'latest.release'
+    testCompile group: 'org.hamcrest', name: 'hamcrest-library', version: 'latest.release'
+}
