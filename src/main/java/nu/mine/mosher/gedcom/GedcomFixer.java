@@ -2,10 +2,10 @@ package nu.mine.mosher.gedcom;
 
 import nu.mine.mosher.collection.TreeNode;
 import nu.mine.mosher.gedcom.date.DatePeriod;
-import nu.mine.mosher.gedcom.exception.GedcomParseException;
 import nu.mine.mosher.gedcom.exception.InvalidLevel;
 import nu.mine.mosher.gedcom.model.Event;
 import nu.mine.mosher.gedcom.model.Loader;
+import nu.mine.mosher.gedcom.model.Person;
 
 import java.io.*;
 import java.nio.charset.Charset;
@@ -139,10 +139,14 @@ public class GedcomFixer {
         final GedcomTree gt = Gedcom.parseFile(in, charset);
         fixCharset(gt.getRoot());
         fix(gt.getRoot());
+        removeFrelMrel(gt.getRoot());
+        removeDuplicateCitations(gt.getRoot());
+        changeSourNoteToSourText(gt);
         addNewNodes();
         delOldNodes();
 
         final Map<String, String> mapRemapIds = new HashMap<>(mapRemapUidToId.size());
+
         gt.getRoot().forEach(top -> {
             top.forEach(lev1 -> {
                 final GedcomLine gedcomLine = lev1.getObject();
@@ -156,10 +160,13 @@ public class GedcomFixer {
             });
         });
 
-        remapIds(gt.getRoot(), mapRemapIds);
+        buildWellFormedFamilyIds(gt, mapRemapIds);
+
 
         final Loader loader = new Loader(gt, args[0]);
         loader.parse();
+        deepSort(gt.getRoot(), loader);
+        remapIds(gt.getRoot(), mapRemapIds);
         sort(loader);
 
         BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), "UTF-8"));
@@ -174,6 +181,104 @@ public class GedcomFixer {
         writerIds.close();
     }
 
+    private static void removeDuplicateCitations(TreeNode<GedcomLine> node) {
+        node.forEach(child -> removeDuplicateCitations(child));
+
+        String sourPointer = "";
+        for (final TreeNode<GedcomLine> child : node) {
+            final GedcomLine gedcomLine = child.getObject();
+            if (gedcomLine != null && child.getChildCount() == 0) {
+                final GedcomTag tag = gedcomLine.getTag();
+                if (tag.equals(GedcomTag.SOUR) && gedcomLine.isPointer()) {
+                    if (sourPointer.isEmpty()) {
+                        sourPointer = gedcomLine.getPointer();
+                    } else if (sourPointer.equals(gedcomLine.getPointer())) {
+                        delNodes.add(child);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void removeFrelMrel(TreeNode<GedcomLine> node) {
+        node.forEach(child -> removeFrelMrel(child));
+        final GedcomLine gedcomLine = node.getObject();
+        if (gedcomLine != null) {
+            final String tagString = gedcomLine.getTagString();
+            if (tagString.equals("_FREL") || tagString.equals("_MREL")) {
+                delNodes.add(node);
+            }
+        }
+    }
+
+    private static void changeSourNoteToSourText(GedcomTree gt) {
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine != null) {
+                if (gedcomLine.getTag().equals(GedcomTag.SOUR)) {
+                    top.forEach(lev1 -> {
+                        final GedcomLine line = lev1.getObject();
+                        if (line.getTag().equals(GedcomTag.NOTE)) {
+                            lev1.setObject(new GedcomLine(line.getLevel(), "@"+line.getID()+"@", GedcomTag.TEXT.name(), line.getValue()));
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private static void buildWellFormedFamilyIds(GedcomTree gt, Map<String, String> mapRemapIds) {
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine != null) {
+                if (gedcomLine.getTag().equals(GedcomTag.FAM)) {
+                    String h = "";
+                    String w = "";
+                    String c1 = "";
+                    String c2 = "";
+                    for (final TreeNode<GedcomLine> m : top) {
+                        final GedcomTag t = m.getObject().getTag();
+                        if (t.equals(GedcomTag.HUSB)) {
+                            h = m.getObject().getPointer();
+                        } else if (t.equals(GedcomTag.WIFE)) {
+                            w = m.getObject().getPointer();
+                        } else if (t.equals(GedcomTag.CHIL)) {
+                            if (c1.isEmpty()) {
+                                c1 = m.getObject().getPointer();
+                            } else if (c2.isEmpty()) {
+                                c2 = m.getObject().getPointer();
+                            }
+                        }
+                    }
+                    final String wellFormedId;
+                    if (!h.isEmpty() && !w.isEmpty()) {
+                        wellFormedId = buildWellFormedId(h,w,mapRemapIds);
+                    } else if (!h.isEmpty() && !c1.isEmpty()) {
+                        wellFormedId = buildWellFormedId(h,c1, mapRemapIds);
+                    } else if (!w.isEmpty() && !c1.isEmpty()) {
+                        wellFormedId = buildWellFormedId(w,c1, mapRemapIds);
+                    } else {
+                        wellFormedId = buildWellFormedId(c1,c2, mapRemapIds);
+                    }
+                    String existingId = gedcomLine.getID();
+                    if (mapRemapIds.containsKey(existingId)) {
+                        existingId = mapRemapIds.get(existingId);
+                    }
+                    mapRemapIds.put(existingId, wellFormedId);
+                }
+            }
+        });
+    }
+
+    private static String buildWellFormedId(String a, String b, Map<String, String> mapRemapIds) {
+        if (mapRemapIds.containsKey(a)) {
+            a = mapRemapIds.get(a);
+        }
+        if (mapRemapIds.containsKey(b)) {
+            b = mapRemapIds.get(b);
+        }
+        return "F_"+a+"_"+b;
+    }
     private static void fixCharset(TreeNode<GedcomLine> root) {
         for (final TreeNode<GedcomLine> node : root) {
             final GedcomLine gedcomLine = node.getObject();
@@ -278,14 +383,16 @@ public class GedcomFixer {
         put(GedcomTag.OBJE, i++);
         put(GedcomTag.NOTE, i++);
     }});
+
     private static final Map<GedcomTag, Integer> mapIndiOrder = Collections.unmodifiableMap(new HashMap<GedcomTag, Integer>() {{
         int i = 0;
         put(GedcomTag._UID, i++);
-        put(GedcomTag.RIN, i++);
         put(GedcomTag.REFN, i++);
+        put(GedcomTag.RIN, i++);
+        put(GedcomTag.CHAN, i++);
+
         put(GedcomTag.RFN, i++);
         put(GedcomTag.AFN, i++);
-        put(GedcomTag.CHAN, i++);
         put(GedcomTag.RESN, i++);
 
         put(GedcomTag.NAME, i++);
@@ -294,11 +401,50 @@ public class GedcomFixer {
         put(GedcomTag.FAMC, i++);
         put(GedcomTag.FAMS, i++);
         put(GedcomTag.ASSO, i++);
-
-        put(GedcomTag.SUBM, i++);
         put(GedcomTag.DESI, i++);
         put(GedcomTag.ANCI, i++);
+
         put(GedcomTag.SOUR, i++);
+        put(GedcomTag.OBJE, i++);
+        put(GedcomTag.NOTE, i++);
+        put(GedcomTag.SUBM, i++);
+    }});
+
+    private static final Map<GedcomTag, Integer> mapFamOrder = Collections.unmodifiableMap(new HashMap<GedcomTag, Integer>() {{
+        int i = 0;
+        put(GedcomTag._UID, i++);
+        put(GedcomTag.REFN, i++);
+        put(GedcomTag.RIN, i++);
+        put(GedcomTag.CHAN, i++);
+
+        put(GedcomTag.HUSB, i++);
+        put(GedcomTag.WIFE, i++);
+        put(GedcomTag.NCHI, i++);
+        put(GedcomTag.CHIL, i++);
+
+        put(GedcomTag.SOUR, i++);
+        put(GedcomTag.OBJE, i++);
+        put(GedcomTag.NOTE, i++);
+        put(GedcomTag.SUBM, i++);
+    }});
+
+    private static final Map<GedcomTag, Integer> mapSourOrder = Collections.unmodifiableMap(new HashMap<GedcomTag, Integer>() {{
+        int i = 0;
+        put(GedcomTag._UID, i++);
+        put(GedcomTag.REFN, i++);
+        put(GedcomTag.RIN, i++);
+        put(GedcomTag.CHAN, i++);
+
+        put(GedcomTag.REPO, i++);
+
+        put(GedcomTag.TITL, i++);
+        put(GedcomTag.AUTH, i++);
+        put(GedcomTag.PUBL, i++);
+        put(GedcomTag.ABBR, i++);
+
+        put(GedcomTag.DATA, i++);
+        put(GedcomTag.TEXT, i++);
+
         put(GedcomTag.OBJE, i++);
         put(GedcomTag.NOTE, i++);
     }});
@@ -324,12 +470,12 @@ public class GedcomFixer {
                     if (c == 0) {
                         c = loader.lookUpSource(node1).getAuthor().compareTo(loader.lookUpSource(node2).getAuthor());
                     }
+                } else if (tag.equals(GedcomTag.FAM)) {
+                    c = node1.getObject().getID().compareTo(node2.getObject().getID());
                 }
             }
             return c;
         });
-
-        deepSort(root, loader);
     }
 
     private static void deepSort(final TreeNode<GedcomLine> node, final Loader loader) {
@@ -363,16 +509,45 @@ public class GedcomFixer {
                     }
                     return c;
                 });
-            } else if (tag.equals(GedcomTag.HEAD)) {
+            } else if (tag.equals(GedcomTag.HEAD) && node.getObject().getLevel() == 0) {
+                node.sort((node1, node2) -> compareTags(node1, node2, mapHeadOrder));
+            } else if (tag.equals(GedcomTag.SOUR) && node.getObject().getLevel() == 0) {
+                node.sort((node1, node2) -> compareTags(node1, node2, mapSourOrder));
+            } else if (tag.equals(GedcomTag.FAM)) {
                 node.sort((node1, node2) -> {
-                    return compareTags(node1, node2, mapHeadOrder);
+                    int c = 0;
+                    final Event event1 = loader.lookUpEvent(node1);
+                    final Event event2 = loader.lookUpEvent(node2);
+                    if (event1 == null && event2 == null) {
+                        c = compareTags(node1, node2, mapFamOrder);
+                        if (c == 0 && node1.getObject().getTag().equals(GedcomTag.CHIL)) {
+                            final TreeNode<GedcomLine> indi1 = loader.getGedcom().getNode(node1.getObject().getPointer());
+                            final Person person1 = loader.lookUpPerson(indi1);
+                            final TreeNode<GedcomLine> indi2 = loader.getGedcom().getNode(node2.getObject().getPointer());
+                            final Person person2 = loader.lookUpPerson(indi2);
+                            c = person1.getBirth().compareTo(person2.getBirth());
+                        }
+                    } else if (event1 == null) {
+                        c = -1;
+                    } else if (event2 == null) {
+                        c = +1;
+                    } else {
+                        final DatePeriod d1 = event1.getDate();
+                        final DatePeriod d2 = event2.getDate();
+                        if (d1 == null && d2 == null) {
+                            c = 0;
+                        } else if (d2 == null) {
+                            c = -1;
+                        } else if (d1 == null) {
+                            c = +1;
+                        } else {
+                            c = event1.getDate().compareTo(event2.getDate());
+                        }
+                    }
+                    return c;
                 });
-            } else if (tag.equals(GedcomTag.SOUR)) {
-                // TODO
             } else if (GedcomTag.setIndividualEvent.contains(tag) || GedcomTag.setIndividualAttribute.contains(tag) || GedcomTag.setFamilyEvent.contains(tag)) {
-                node.sort((node1, node2) -> {
-                    return compareTags(node1, node2, mapEventOrder);
-                });
+                node.sort((node1, node2) -> compareTags(node1, node2, mapEventOrder));
             }
         }
     }
@@ -424,6 +599,7 @@ public class GedcomFixer {
     private static final List<ChildToBeAdded> newNodes = new ArrayList<>(256);
     private static final List<TreeNode<GedcomLine>> delNodes = new ArrayList<>(256);
 
+    private static final Pattern NAME_WITH_SLASHED_SURNAME = Pattern.compile("^(.*)/(.*)/(.*)$");
     private static final Pattern USA_STATE_CODE = Pattern.compile("(.*)([A-Z]{2}), USA$");
 
     private static void fix(final TreeNode<GedcomLine> node) {
@@ -435,14 +611,17 @@ public class GedcomFixer {
             final GedcomTag tag = gedcomLine.getTag();
             String value = gedcomLine.getValue();
             final String valueOrig = value;
+            value = value.trim();
             if (tag.equals(GedcomTag.DATE)) {
                 value = fixDate(value);
             } else if (tag.equals(GedcomTag.NOTE)) {
-                value = value.replace("  ", "\n");
+                value = fixSpacing(value);
                 value = extractCustomTags(value, node).trim();
-                if (value.isEmpty() && node.getChildCount() == 0) {
+                if (value.isEmpty() && !node.getObject().isPointer() && node.getChildCount() == 0) {
                     delNodes.add(node);
                 }
+            } else if (tag.equals(GedcomTag.TEXT)) {
+                value = fixSpacing(value);
             } else if (tag.equals(GedcomTag.PLAC)) {
                 final Matcher matcher = USA_STATE_CODE.matcher(value);
                 if (matcher.matches()) {
@@ -451,11 +630,79 @@ public class GedcomFixer {
                         value = matcher.group(1) + nameState + ", USA";
                     }
                 }
+            } else if (tag.equals(GedcomTag.NAME)) {
+                value = formatName(value);
+            } else if (tag.equals(GedcomTag.UNKNOWN)) {
+                final String tagString = gedcomLine.getTagString();
+                if (tagString.equals("_SEPR")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
+                    final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
+                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "separation")),existingFirstChild);
+                } else if (tagString.equals("_EXCM")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
+                    final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
+                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "excommunication")),existingFirstChild);
+                } else if (tagString.equals("_FUN")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
+                    final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
+                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "funeral")),existingFirstChild);
+                } else if (tagString.equals("_MILT")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
+                    final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
+                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "military")),existingFirstChild);
+                    final String note = gedcomLine.getValue();
+                    if (!note.isEmpty()) {
+                        node.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel() + 1, "", GedcomTag.NOTE.name(), note)));
+                    }
+                }
             }
             if (!value.equals(valueOrig)) {
                 node.setObject(new GedcomLine(gedcomLine.getLevel(), "@" + gedcomLine.getID() + "@", gedcomLine.getTag().name(), value));
             }
         }
+    }
+
+    private static String fixSpacing(String value) {
+//        while (value.contains("   ")) {
+//            value = value.replace("   ", " \n");
+//        }
+        while (value.contains("  ")) {
+            value = value.replace("  ", "\n");
+        }
+        while (value.contains("\n\n\n")) {
+            value = value.replace("\n\n\n", "\n\n");
+        }
+        return value;
+    }
+
+    public static String formatName(String name) {
+        name = name.trim();
+        while (name.contains("  ")) {
+            name = name.replace("  ", " ");
+        }
+        final Matcher matcher = NAME_WITH_SLASHED_SURNAME.matcher(name);
+        if (!matcher.matches()) {
+            // no surname
+            return name+" //";
+        }
+        final String given1 = matcher.group(1).trim();
+        final String sur = matcher.group(2).trim();
+        final String given2 = matcher.group(3).trim();
+
+        final StringBuilder sb = new StringBuilder(32);
+
+        if (!given1.isEmpty()) {
+            sb.append(given1).append(" ");
+        }
+        sb.append("/").append(sur).append("/");
+        if (!given2.isEmpty()) {
+            if (Character.isAlphabetic(given2.codePointAt(0))) {
+                sb.append(" ");
+            }
+            sb.append(given2);
+        }
+
+        return sb.toString();
     }
 
     private static final Pattern CUSTOM_TAG = Pattern.compile("(_\\p{Alnum}+) +(.*)");

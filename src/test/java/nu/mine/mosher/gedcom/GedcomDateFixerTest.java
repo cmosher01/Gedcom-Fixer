@@ -14,7 +14,7 @@ import static org.hamcrest.Matchers.*;
  * Created by user on 1/16/16.
  */
 @RunWith(Parameterized.class)
-public class GedcomFixerTest {
+public class GedcomDateFixerTest {
     @Parameters(name = "DATE {0}")
     public static Iterable<Object[]> data() {
         return Arrays.asList(new Object[][]{
@@ -79,7 +79,7 @@ public class GedcomFixerTest {
     private final String expected;
 
 
-    public GedcomFixerTest(final String input, final String expected) {
+    public GedcomDateFixerTest(final String input, final String expected) {
         this.input = input;
         this.expected = expected;
     }
