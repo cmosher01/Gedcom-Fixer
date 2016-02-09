@@ -123,9 +123,6 @@ public class GedcomFixer {
             throw new IllegalArgumentException("usage: java nu.mine.mosher.gedcom.GedcomFixer gedcom-file [uid-remap-file]");
         }
 
-        final File in = new File(args[0]);
-        final Charset charset = Gedcom.getCharset(in);
-
         final Map<UUID, String> mapRemapUidToId = new HashMap<>(512);
         if (args.length > 1) {
             final File fileIdsToRemap = new File(args[1]);
@@ -136,12 +133,15 @@ public class GedcomFixer {
             }
         }
 
+        final File in = new File(args[0]);
+        final Charset charset = Gedcom.getCharset(in);
         final GedcomTree gt = Gedcom.parseFile(in, charset);
         fixCharset(gt.getRoot());
         fix(gt.getRoot());
         removeFrelMrel(gt.getRoot());
         removeDuplicateCitations(gt.getRoot());
         changeSourNoteToSourText(gt);
+        combineMultipleDataRecords(gt.getRoot());
         addNewNodes();
         delOldNodes();
 
@@ -150,23 +150,33 @@ public class GedcomFixer {
         gt.getRoot().forEach(top -> {
             top.forEach(lev1 -> {
                 final GedcomLine gedcomLine = lev1.getObject();
-                if (gedcomLine.getTag().equals(GedcomTag._UID)) {
-                    final UUID candidate = UUID.fromString(gedcomLine.getValue());
-                    final String sRemapId = mapRemapUidToId.get(candidate);
-                    if (sRemapId != null) {
-                        mapRemapIds.put(top.getObject().getID(),sRemapId);
+                if (gedcomLine.getTag().equals(GedcomTag._UID) || gedcomLine.getTag().equals(GedcomTag.REFN)) {
+                    try {
+                        final UUID candidate = UUID.fromString(gedcomLine.getValue());
+                        final String sRemapId = mapRemapUidToId.get(candidate);
+                        if (sRemapId != null) {
+                            mapRemapIds.put(top.getObject().getID(), sRemapId);
+                        }
+                    } catch (final Throwable e) {
+                        e.printStackTrace();
                     }
                 }
             });
         });
 
-        buildWellFormedFamilyIds(gt, mapRemapIds);
 
 
         final Loader loader = new Loader(gt, args[0]);
         loader.parse();
+        addEmptyRins(gt);
         deepSort(gt.getRoot(), loader);
+        buildWellFormedFamilyIds(gt, mapRemapIds);
         remapIds(gt.getRoot(), mapRemapIds);
+        addUidsToFams(gt, mapRemapUidToId);
+        changeUidToRefn(gt);
+        fixSexRecords(gt);
+        addRins(gt);
+        addFamilyHistorianRootIndi(gt);
         sort(loader);
 
         BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), "UTF-8"));
@@ -179,6 +189,180 @@ public class GedcomFixer {
         writeIds(gt, writerIds);
         writerIds.flush();
         writerIds.close();
+    }
+
+    private static void addEmptyRins(GedcomTree gt) {
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine != null && gedcomLine.hasID()) {
+                boolean hasRin = false;
+                for (final TreeNode<GedcomLine> c : top) {
+                    final GedcomLine gedcomLine1 = c.getObject();
+                    if (gedcomLine1.getTag().equals(GedcomTag.RIN)) {
+                        hasRin = true;
+                    }
+                }
+                if (!hasRin) {
+                    top.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.RIN.name(), "")));
+                }
+            }
+        });
+    }
+
+    private static void addFamilyHistorianRootIndi(GedcomTree gt) {
+        String indi = null;
+        {
+            final Iterator<TreeNode<GedcomLine>> i = gt.getRoot().children();
+            while (i.hasNext() && indi == null) {
+                final TreeNode<GedcomLine> node = i.next();
+                final GedcomLine gedcomLine = node.getObject();
+                if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                    indi = gedcomLine.getID();
+                }
+            }
+            if (indi == null) {
+                return;
+            }
+        }
+
+        {
+            boolean haveRoot = false;
+            final Iterator<TreeNode<GedcomLine>> i = gt.getRoot().children();
+            while (i.hasNext() && !haveRoot) {
+                final TreeNode<GedcomLine> node = i.next();
+                final GedcomLine gedcomLine = node.getObject();
+                if (gedcomLine.getTag().equals(GedcomTag.HEAD)) {
+                    final Iterator<TreeNode<GedcomLine>> ic = node.children();
+                    boolean hadRoot = false;
+                    while (ic.hasNext()) {
+                        final TreeNode<GedcomLine> nodec = ic.next();
+                        final GedcomLine gedcomLinec = nodec.getObject();
+                        if (gedcomLinec.getTagString().equals("_ROOT")) {
+                            hadRoot = true;
+                            haveRoot = true;
+                        }
+                    }
+                    if (!hadRoot) {
+                        node.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", "_ROOT", "@"+indi+"@")));
+                        haveRoot = true;
+                    }
+                }
+            }
+        }
+    }
+
+    private static void addRins(GedcomTree gt) {
+        final HashMap<String, String> remap = new HashMap<>();
+
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine != null && gedcomLine.hasID()) {
+                for (final TreeNode<GedcomLine> c : top) {
+                    final GedcomLine gedcomLine1 = c.getObject();
+                    if (gedcomLine1.getTag().equals(GedcomTag.RIN)) {
+                        final String rin = gedcomLine1.getValue();
+                        if (rin.isEmpty()) {
+                            c.setObject(new GedcomLine(gedcomLine1.getLevel(), "", GedcomTag.RIN.name(), gedcomLine.getID()));
+                        } else {
+                            // TODO: safety check, make sure ID doesn't already exist
+                            remap.put(gedcomLine.getID(), rin);
+                        }
+                    }
+                }
+            }
+        });
+
+        remapIds(gt.getRoot(), remap);
+    }
+
+    /*
+        2 SOUR @S-333410853@  <---------------node
+            3 PAGE Vol. 10, No. 23, p. 3
+            3 DATA <----------------------------- child  <-i(0)   <- prev
+                4 DATE 1885-09-24
+            3 DATA <----------------------------- child  <-i(1)
+                4 TEXT OBITUARY.CHARLOTTE LOVEJOY.On Saturday, September 19, 1885 p  <----- sub
+     */
+    private static void combineMultipleDataRecords(final TreeNode<GedcomLine> node) {
+        node.forEach(top -> combineMultipleDataRecords(top));
+
+        TreeNode<GedcomLine> prev = null;
+        final ListIterator<TreeNode<GedcomLine>> i = node.childrenList();
+        while (i.hasNext()) {
+            final TreeNode<GedcomLine> child = i.next();
+            final GedcomLine childLine = child.getObject();
+            if (childLine.getTag().equals(GedcomTag.DATA)) {
+                if (prev == null) {
+                    prev = child;
+                } else {
+                    final ListIterator<TreeNode<GedcomLine>> subi = child.childrenList();
+                    while (subi.hasNext()) {
+                        final TreeNode<GedcomLine> sub = subi.next();
+                        subi.remove();
+                        prev.addChild(sub);
+                    }
+                    i.remove();
+                }
+            }
+        }
+    }
+
+    private static void fixSexRecords(final GedcomTree gt) {
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine != null) {
+                if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                    final ListIterator<TreeNode<GedcomLine>> lev1 = top.childrenList();
+                    while (lev1.hasNext()) {
+                        final TreeNode<GedcomLine> node = lev1.next();
+                        final GedcomLine line = node.getObject();
+                        if (line.getTag().equals(GedcomTag.SEX)) {
+                            final String s = line.getValue().toUpperCase();
+                            if (!(s.equals("M") || s.equals("F"))) {
+                                lev1.remove();
+                            } else {
+                                final ListIterator<TreeNode<GedcomLine>> c = node.childrenList();
+                                while (c.hasNext()) {
+                                    c.next();
+                                    c.remove();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private static void changeUidToRefn(final GedcomTree gt) {
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine != null) {
+                top.forEach(lev1 -> {
+                    final GedcomLine line = lev1.getObject();
+                    if (line.getTag().equals(GedcomTag._UID)) {
+                        lev1.setObject(new GedcomLine(line.getLevel(), "@"+line.getID()+"@", GedcomTag.REFN.name(), line.getValue()));
+                    }
+                });
+            }
+        });
+    }
+
+    private static void addUidsToFams(final GedcomTree gt, Map<UUID, String> mapRemapUidToId) {
+        final Map<String, UUID> mapRemapIdToUid = new HashMap<>();
+        mapRemapUidToId.forEach((uuid, id) -> {
+            mapRemapIdToUid.put(id, uuid);
+        });
+        gt.getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.FAM)) {
+                final String famId = gedcomLine.getID();
+                if (mapRemapIdToUid.containsKey(famId)) {
+                    final UUID famUuid = mapRemapIdToUid.get(famId);
+                    top.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag._UID.name(), famUuid.toString())));
+                }
+            }
+        });
     }
 
     private static void removeDuplicateCitations(TreeNode<GedcomLine> node) {
@@ -300,14 +484,14 @@ public class GedcomFixer {
             if (gedcomLine.hasID()) {
                 final String newId = mapRemapIds.get(gedcomLine.getID());
                 if (newId != null) {
-                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+newId+"@", gedcomLine.getTag().name(), gedcomLine.getValue()));
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+newId+"@", gedcomLine.getTagString(), gedcomLine.getValue()));
                 }
             }
             if (gedcomLine.isPointer()) {
                 final String newId = mapRemapIds.get(gedcomLine.getPointer());
                 if (newId != null) {
                     // assume that no line with a pointer also has an ID (true as of Gedcom 5.5)
-                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "", gedcomLine.getTag().name(), "@"+newId+"@"));
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "", gedcomLine.getTagString(), "@"+newId+"@"));
                 }
             }
         }
@@ -318,7 +502,7 @@ public class GedcomFixer {
             top.forEach(lev1 -> {
                 try {
                     final GedcomLine gedcomLine = lev1.getObject();
-                    if (gedcomLine.getTag().equals(GedcomTag._UID)) {
+                    if (gedcomLine.getTag().equals(GedcomTag.REFN)) {
                         writerIds.write(gedcomLine.getValue() + "," + top.getObject().getID());
                         writerIds.newLine();
                     }
@@ -449,6 +633,16 @@ public class GedcomFixer {
         put(GedcomTag.NOTE, i++);
     }});
 
+    private static final Map<GedcomTag, Integer> mapCitationOrder = Collections.unmodifiableMap(new HashMap<GedcomTag, Integer>() {{
+        int i = 0;
+        put(GedcomTag.PAGE, i++);
+        put(GedcomTag.QUAY, i++);
+        put(GedcomTag.EVEN, i++);
+        put(GedcomTag.DATA, i++);
+        put(GedcomTag.OBJE, i++);
+        put(GedcomTag.NOTE, i++);
+    }});
+
     private static void sort(final Loader loader) {
         final GedcomTree gedcom = loader.getGedcom();
         final TreeNode<GedcomLine> root = gedcom.getRoot();
@@ -465,12 +659,17 @@ public class GedcomFixer {
                     if (c == 0) {
                         c = loader.lookUpPerson(node1).getBirth().compareTo(loader.lookUpPerson(node2).getBirth());
                     }
+                    if (c == 0) {
+                        c = loader.lookUpPerson(node1).getUuid().compareTo(loader.lookUpPerson(node2).getUuid());
+                    }
                 } else if (tag.equals(GedcomTag.SOUR)) {
                     c = loader.lookUpSource(node1).getTitle().compareTo(loader.lookUpSource(node2).getTitle());
                     if (c == 0) {
                         c = loader.lookUpSource(node1).getAuthor().compareTo(loader.lookUpSource(node2).getAuthor());
                     }
                 } else if (tag.equals(GedcomTag.FAM)) {
+                    c = node1.getObject().getID().compareTo(node2.getObject().getID());
+                } else if (tag.equals(GedcomTag.NOTE)) {
                     c = node1.getObject().getID().compareTo(node2.getObject().getID());
                 }
             }
@@ -492,8 +691,10 @@ public class GedcomFixer {
                         c = compareTags(node1, node2, mapIndiOrder);
                     } else if (event1 == null) {
                         c = -1;
+                        // TODO heuristic event ordering, such as BIRT < CHR, DEAT < PROB, DEAT < BURI, BIRT < other < DEAT
                     } else if (event2 == null) {
                         c = +1;
+                        // TODO heuristic event ordering, such as BIRT < CHR, DEAT < PROB, DEAT < BURI, BIRT < other < DEAT
                     } else {
                         final DatePeriod d1 = event1.getDate();
                         final DatePeriod d2 = event2.getDate();
@@ -506,6 +707,9 @@ public class GedcomFixer {
                         } else {
                             c = event1.getDate().compareTo(event2.getDate());
                         }
+                        if (c == 0 ) {
+                            // TODO heuristic event ordering, such as BIRT < CHR, DEAT < PROB, DEAT < BURI, BIRT < other < DEAT
+                        }
                     }
                     return c;
                 });
@@ -513,6 +717,8 @@ public class GedcomFixer {
                 node.sort((node1, node2) -> compareTags(node1, node2, mapHeadOrder));
             } else if (tag.equals(GedcomTag.SOUR) && node.getObject().getLevel() == 0) {
                 node.sort((node1, node2) -> compareTags(node1, node2, mapSourOrder));
+            } else if (tag.equals(GedcomTag.SOUR) && node.getObject().getLevel() > 0) {
+                node.sort((node1, node2) -> compareTags(node1, node2, mapCitationOrder));
             } else if (tag.equals(GedcomTag.FAM)) {
                 node.sort((node1, node2) -> {
                     int c = 0;
@@ -520,12 +726,21 @@ public class GedcomFixer {
                     final Event event2 = loader.lookUpEvent(node2);
                     if (event1 == null && event2 == null) {
                         c = compareTags(node1, node2, mapFamOrder);
-                        if (c == 0 && node1.getObject().getTag().equals(GedcomTag.CHIL)) {
-                            final TreeNode<GedcomLine> indi1 = loader.getGedcom().getNode(node1.getObject().getPointer());
-                            final Person person1 = loader.lookUpPerson(indi1);
-                            final TreeNode<GedcomLine> indi2 = loader.getGedcom().getNode(node2.getObject().getPointer());
-                            final Person person2 = loader.lookUpPerson(indi2);
-                            c = person1.getBirth().compareTo(person2.getBirth());
+                        if (c == 0) {
+                            final GedcomLine line1 = node1.getObject();
+                            final GedcomLine line2 = node2.getObject();
+                            if (line1.getTag().equals(GedcomTag.CHIL)) {
+                                final TreeNode<GedcomLine> indi1 = loader.getGedcom().getNode(line1.getPointer());
+                                final Person person1 = loader.lookUpPerson(indi1);
+                                final TreeNode<GedcomLine> indi2 = loader.getGedcom().getNode(line2.getPointer());
+                                final Person person2 = loader.lookUpPerson(indi2);
+                                c = person1.getBirth().compareTo(person2.getBirth());
+                            }
+                            if (c == 0) {
+                                final String v1 = line1.isPointer() ? line1.getPointer() : line1.getValue();
+                                final String v2 = line2.isPointer() ? line2.getPointer() : line2.getValue();
+                                c = v1.compareTo(v2);
+                            }
                         }
                     } else if (event1 == null) {
                         c = -1;
@@ -553,8 +768,10 @@ public class GedcomFixer {
     }
 
     private static int compareTags(TreeNode<GedcomLine> node1, TreeNode<GedcomLine> node2, final Map<GedcomTag, Integer> mapOrder) {
-        final Integer o1 = mapOrder.get(node1.getObject().getTag());
-        final Integer o2 = mapOrder.get(node2.getObject().getTag());
+        final GedcomLine line1 = node1.getObject();
+        final Integer o1 = mapOrder.get(line1.getTag());
+        final GedcomLine line2 = node2.getObject();
+        final Integer o2 = mapOrder.get(line2.getTag());
 
         if (o1 == null && o2 == null) {
             return 0;
@@ -571,7 +788,9 @@ public class GedcomFixer {
         if (o2 < o1) {
             return +1;
         }
-        return 0;
+        final String s1 = line1.isPointer() ? line1.getPointer() : line1.getValue();
+        final String s2 = line2.isPointer() ? line2.getPointer() : line2.getValue();
+        return s1.compareTo(s2);
     }
 
     private static final Pattern DATE_BET = Pattern.compile("(?:BET|BTW)\\.? (.*)(?:–|-| AND )(.*)");
@@ -654,6 +873,14 @@ public class GedcomFixer {
                     if (!note.isEmpty()) {
                         node.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel() + 1, "", GedcomTag.NOTE.name(), note)));
                     }
+                } else if (tagString.equals("_FACE")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
+                    final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
+                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "military")),existingFirstChild);
+                    final String note = gedcomLine.getValue();
+                    if (!note.isEmpty()) {
+                        node.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel() + 1, "", GedcomTag.NOTE.name(), note)));
+                    }
                 }
             }
             if (!value.equals(valueOrig)) {
@@ -663,14 +890,22 @@ public class GedcomFixer {
     }
 
     private static String fixSpacing(String value) {
+        // TODO: can we preserve original spacing any better here?
 //        while (value.contains("   ")) {
 //            value = value.replace("   ", " \n");
 //        }
+        // Ancestry.com converts each newline to two spaces
         while (value.contains("  ")) {
             value = value.replace("  ", "\n");
         }
         while (value.contains("\n\n\n")) {
             value = value.replace("\n\n\n", "\n\n");
+        }
+        while (value.contains("\n ")) {
+            value = value.replace("\n ", "\n");
+        }
+        while (value.contains(" \n")) {
+            value = value.replace(" \n", "\n");
         }
         return value;
     }
