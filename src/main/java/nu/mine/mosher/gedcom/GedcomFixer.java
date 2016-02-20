@@ -142,6 +142,7 @@ public class GedcomFixer {
         removeDuplicateCitations(gt.getRoot());
         changeSourNoteToSourText(gt);
         combineMultipleDataRecords(gt.getRoot());
+        convertObjeLinksToFhRecords(gt);
         addNewNodes();
         delOldNodes();
 
@@ -189,6 +190,156 @@ public class GedcomFixer {
         writeIds(gt, writerIds);
         writerIds.flush();
         writerIds.close();
+    }
+
+    /*
+Convert OBJE link to FH-style OBJE record:
+
+  1 OBJE    <-------------gedcomLine---child---
+    2 FILE xyz    <-----------lineAttr---attr--
+    2 FORM jpg
+    2 TITL xyz
+    2 NOTE ...
+    3 ...
+  1 OBJE
+    2 FILE xyz
+    2 FORM jpg
+    2 TITL xyz
+    2 NOTE ...
+    3 ...
+------------------
+  1 OBJE @O1@
+  1 OBJE @O1@
+0 @O1@ OBJE    <---------()---topObje---
+  1 _FILE xyz
+  1 FORM jpg
+  1 TITL xyz
+
+
+
+r(node):
+
+for each child of node:
+    if child is OBJE (with no ID and no pointer)
+        get value child's child FILE
+        (warn if has NOTE child)
+        if mapFiles contains value
+            id = mapFiles[value]
+        else
+            id = get new id from IdManager
+            mapFiles[value] = id
+            rec = new gcl(0, id, OBJE, "")
+            copy_obje_children(from child, to rec)***
+        end
+        delete children of child
+        child.setObject(new gcl(child.level, "", OBJE, id))
+    else
+        r(child)
+    end
+end
+
+***copy_obje_children(from, to)
+for each child of from
+    tag = child.tag==FILE ? _FILE : child.tag
+    to.addChild(new gcl(to.level+1, "", tag, child.value))
+end
+    */
+    private static class ObjeIdManager {
+        private final Set<String> objeIds = new HashSet<>(256);
+        private int id;
+        ObjeIdManager(final GedcomTree gt) {
+            gt.getRoot().forEach(top -> {
+                final GedcomLine gedcomLine = top.getObject();
+                if (gedcomLine.getTag().equals(GedcomTag.OBJE) && gedcomLine.hasID()) {
+                    this.objeIds.add(gedcomLine.getID());
+                }
+            });
+            this.id = (int) (objeIds.size()*1.1);
+        }
+        String next() {
+            String r = makeId();
+            ++this.id;
+            while (this.objeIds.contains(r)) {
+                r = makeId();
+                ++this.id;
+            }
+            return r;
+        }
+        private String makeId() {
+            return "O"+this.id;
+        }
+    }
+    private static void convertObjeLinksToFhRecords(final GedcomTree gt) {
+        final HashMap<String, String> mapFileToId = new HashMap<>(256);
+        convertObjeLinksToFhRecordsRecurse(gt.getRoot(),new ObjeIdManager(gt), mapFileToId, gt);
+    }
+
+    private static void convertObjeLinksToFhRecordsRecurse(TreeNode<GedcomLine> node, ObjeIdManager objeIdManager, HashMap<String, String> mapFileToId, GedcomTree gt) {
+        final Iterator<TreeNode<GedcomLine>> children = node.children();
+        while (children.hasNext()) {
+            final TreeNode<GedcomLine> child = children.next();
+            final GedcomLine gedcomLine = child.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.OBJE) && !gedcomLine.hasID() && !gedcomLine.isPointer()) {
+
+                String file = "";
+                {
+                    final Iterator<TreeNode<GedcomLine>> iterAttr = child.children();
+                    while (iterAttr.hasNext()) {
+                        final TreeNode<GedcomLine> attr = iterAttr.next();
+                        final GedcomLine gedcomLineAttr = attr.getObject();
+                        if (gedcomLineAttr.getTag().equals(GedcomTag.FILE)) {
+                            file = gedcomLineAttr.getValue();
+                        } else if (gedcomLineAttr.getTag().equals(GedcomTag.NOTE)) {
+                            // TODO: support NOTE (which may have children)
+                            System.err.println("Handling OBJE.NOTE is not yet implemented; discarding.");
+                        }
+                    }
+                }
+                if (file.isEmpty()) {
+                    System.err.println("Could not file FILE for OBJE; will not move this OBJE.");
+                } else {
+                    String id = "";
+                    if (mapFileToId.containsKey(file)) {
+                        id = mapFileToId.get(file);
+                    } else {
+                        id = "@" + objeIdManager.next() + "@";
+                        mapFileToId.put(file, id);
+
+                        final TreeNode<GedcomLine> topObje = new TreeNode<>(new GedcomLine(0, id, GedcomTag.OBJE.name(), ""));
+                        newNodes.add(new ChildToBeAdded(gt.getRoot(), topObje));
+
+
+                        final Iterator<TreeNode<GedcomLine>> iterAttr = child.children();
+                        while (iterAttr.hasNext()) {
+                            final TreeNode<GedcomLine> attr = iterAttr.next();
+                            final GedcomLine lineAttr = attr.getObject();
+                            final String tag = lineAttr.getTag().equals(GedcomTag.FILE) ? "_FILE" : lineAttr.getTagString();
+                            String value = lineAttr.isPointer() ? lineAttr.getPointer() : lineAttr.getValue();
+                            if (tag.equals("_FILE")) {
+                                value = fixAncestryImageUrl(value);
+                            }
+                            topObje.addChild(new TreeNode<>(new GedcomLine(1, "", tag, value)));
+                        }
+                    }
+                    child.removeAllChildren();
+                    child.setObject(new GedcomLine(gedcomLine.getLevel(), "", GedcomTag.OBJE.name(), id));
+                }
+
+
+
+            } else {
+                convertObjeLinksToFhRecordsRecurse(child, objeIdManager, mapFileToId, gt);
+            }
+        }
+    }
+
+    private static final Pattern IMAGE_URL = Pattern.compile("&pid=[0-9]+");
+    private static String fixAncestryImageUrl(String value) {
+        final Matcher matcher = IMAGE_URL.matcher(value);
+        if (matcher.find()) {
+            value = value.substring(0, matcher.start());
+        }
+        return value;
     }
 
     private static void addEmptyRins(GedcomTree gt) {
@@ -822,7 +973,6 @@ public class GedcomFixer {
     private static final Pattern USA_STATE_CODE = Pattern.compile("(.*)([A-Z]{2}), USA$");
 
     private static void fix(final TreeNode<GedcomLine> node) {
-
         node.forEach(child -> fix(child));
 
         final GedcomLine gedcomLine = node.getObject();
@@ -881,6 +1031,47 @@ public class GedcomFixer {
                     if (!note.isEmpty()) {
                         node.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel() + 1, "", GedcomTag.NOTE.name(), note)));
                     }
+                }
+            } else if (
+                    ((GedcomTag.setIndividualEvent.contains(tag) || GedcomTag.setFamilyEvent.contains(tag)) && !value.isEmpty() && !value.equals("Y")) ||
+                    ((tag.equals(GedcomTag.RESI) || tag.equals(GedcomTag.EVEN)) && !value.isEmpty())) {
+/*
+
+move data out of RESI (etc.) tags into NOTEs
+
+-------------------------------------------------------------------------------
+1 RESI Relation to Head of House: Wife's mother  <----tag/value---gedcomLine--node---
+  2 DATE 1865
+  2 ...
+  2 NOTE foo
+--------->
+1 RESI
+  2 DATE 1865
+  2 ...
+  2 NOTE foo; Relation to Head of House: Wife's mother
+-------------------------------------------------------------------------------
+1 RESI Relation to Head of House: Wife's mother
+  2 DATE 1865
+  2 ...
+--------->
+1 RESI
+  2 DATE 1865
+  2 ...
+  2 NOTE Relation to Head of House: Wife's mother
+
+ */
+                final Iterator<TreeNode<GedcomLine>> i = node.children();
+                while (i.hasNext()) {
+                    final TreeNode<GedcomLine> attr = i.next();
+                    final GedcomLine gedcomLineAttr = attr.getObject();
+                    if (gedcomLineAttr.getTag().equals(GedcomTag.NOTE)) {
+                        attr.setObject(new GedcomLine(gedcomLineAttr.getLevel(), "", GedcomTag.NOTE.name(), gedcomLineAttr.getValue()+"; "+value));
+                        value = "";
+                    }
+                }
+                if (!value.isEmpty()) {
+                    node.addChild(new TreeNode<>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.NOTE.name(), value)));
+                    value = "";
                 }
             }
             if (!value.equals(valueOrig)) {
