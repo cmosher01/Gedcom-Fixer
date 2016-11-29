@@ -296,7 +296,7 @@ end
                     }
                 }
                 if (file.isEmpty()) {
-                    System.err.println("Could not file FILE for OBJE; will not move this OBJE.");
+                    System.err.println("Could not find FILE for OBJE; will not move this OBJE.");
                 } else {
                     String id = "";
                     if (mapFileToId.containsKey(file)) {
@@ -811,7 +811,7 @@ end
                         c = loader.lookUpPerson(node1).getBirth().compareTo(loader.lookUpPerson(node2).getBirth());
                     }
                     if (c == 0) {
-                        c = loader.lookUpPerson(node1).getUuid().compareTo(loader.lookUpPerson(node2).getUuid());
+                        c = loader.lookUpPerson(node1).getID().compareTo(loader.lookUpPerson(node2).getID());
                     }
                 } else if (tag.equals(GedcomTag.SOUR)) {
                     c = loader.lookUpSource(node1).getTitle().compareTo(loader.lookUpSource(node2).getTitle());
@@ -986,7 +986,7 @@ end
             } else if (tag.equals(GedcomTag.NOTE)) {
                 value = fixSpacing(value);
                 value = extractCustomTags(value, node).trim();
-                if (value.isEmpty() && !node.getObject().isPointer() && node.getChildCount() == 0) {
+                if (value.isEmpty() && !gedcomLine.isPointer() && node.getChildCount() == 0) {
                     delNodes.add(node);
                 }
             } else if (tag.equals(GedcomTag.TEXT)) {
@@ -1001,6 +1001,19 @@ end
                 }
             } else if (tag.equals(GedcomTag.NAME)) {
                 value = formatName(value);
+            } else if (tag.equals(GedcomTag.REPO)) {
+                /* sometimes ancestry exports empty REPO pointers; remove them */
+                if (gedcomLine.getPointer().isEmpty() && gedcomLine.getID().isEmpty()) {
+                    delNodes.add(node);
+                }
+            } else if (tag.equals(GedcomTag.SOUR)) {
+                /* this is to remove the HEAD.SOUR record indicating this is from ancestry.com,
+                because that could trigger some applications (notably Family Historian) to kick in
+                some of their own fixes, which could conflict with what this program is fixing
+                (like the automatic CONC fixing) */
+                if (value.startsWith("Ancestry.com")) {
+                    delNodes.add(node);
+                }
             } else if (tag.equals(GedcomTag.UNKNOWN)) {
                 final String tagString = gedcomLine.getTagString();
                 if (tagString.equals("_SEPR")) {
@@ -1015,6 +1028,10 @@ end
                     node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
                     final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
                     node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "funeral")),existingFirstChild);
+                } else if (tagString.equals("_WEIG")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.DSCR.name(), "weight: "+gedcomLine.getValue()));
+                } else if (tagString.equals("_HEIG")) {
+                    node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.DSCR.name(), "height: "+gedcomLine.getValue()));
                 } else if (tagString.equals("_MILT")) {
                     node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
                     final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
