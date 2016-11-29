@@ -939,9 +939,10 @@ end
         if (o2 < o1) {
             return +1;
         }
-        final String s1 = line1.isPointer() ? line1.getPointer() : line1.getValue();
-        final String s2 = line2.isPointer() ? line2.getPointer() : line2.getValue();
-        return s1.compareTo(s2);
+        return 0;
+//        final String s1 = line1.isPointer() ? line1.getPointer() : line1.getValue();
+//        final String s2 = line2.isPointer() ? line2.getPointer() : line2.getValue();
+//        return s1.compareTo(s2);
     }
 
     private static final Pattern DATE_BET = Pattern.compile("(?:BET|BTW)\\.? (.*)(?:–|-| AND )(.*)");
