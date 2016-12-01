@@ -1001,7 +1001,9 @@ end
                     }
                 }
             } else if (tag.equals(GedcomTag.NAME)) {
-                value = formatName(value);
+                if (node.parent().getObject().getTag().equals(GedcomTag.INDI)) {
+                    value = formatName(value);
+                }
             } else if (tag.equals(GedcomTag.REPO)) {
                 /* sometimes ancestry exports empty REPO pointers; remove them */
                 if (gedcomLine.getPointer().isEmpty() && gedcomLine.getID().isEmpty()) {
