@@ -181,7 +181,7 @@ public class GedcomFixer {
         sort(loader);
 
         BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), "UTF-8"));
-        Gedcom.writeFile(gt, out);
+        Gedcom.writeFile(gt, out, 120);
         out.flush();
         out.close();
 
@@ -416,7 +416,9 @@ end
                             c.setObject(new GedcomLine(gedcomLine1.getLevel(), "", GedcomTag.RIN.name(), gedcomLine.getID()));
                         } else {
                             // TODO: safety check, make sure ID doesn't already exist
-                            remap.put(gedcomLine.getID(), rin);
+                            if (!rin.equals(gedcomLine.getID())) {
+                                remap.put(gedcomLine.getID(), rin);
+                            }
                         }
                     }
                 }
