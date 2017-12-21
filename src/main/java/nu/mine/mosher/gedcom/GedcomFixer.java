@@ -8,9 +8,8 @@ import nu.mine.mosher.gedcom.model.Loader;
 import nu.mine.mosher.gedcom.model.Person;
 
 import java.io.*;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -121,7 +120,7 @@ public class GedcomFixer {
 
     public static void main(final String... args) throws InvalidLevel, IOException {
         if (args.length < 1) {
-            throw new IllegalArgumentException("usage: java nu.mine.mosher.gedcom.GedcomFixer gedcom-file [uid-remap-file]");
+            throw new IllegalArgumentException("\n\nusage:\n    gedcom-fixer orig.ged [uid-remap-file] >fixed.ged");
         }
 
         final Map<UUID, String> mapRemapUidToId = new HashMap<>(512);
@@ -135,9 +134,9 @@ public class GedcomFixer {
         }
 
         final File in = new File(args[0]);
-        final Charset charset = Gedcom.getCharset(in);
-        final GedcomTree gt = Gedcom.parseFile(in, charset);
-        fixCharset(gt.getRoot());
+        final GedcomTree gt = Gedcom.readFile(new BufferedInputStream(new FileInputStream(in)));
+        new GedcomConcatenator(gt).concatenate();
+        gt.setCharset(StandardCharsets.UTF_8);
 
         fix(gt.getRoot(), gt);
         removeFrelMrelPhoto(gt.getRoot());
@@ -189,8 +188,10 @@ public class GedcomFixer {
 
         showSourDups(gt);
 
-        BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), "UTF-8"));
-        Gedcom.writeFile(gt, out, 120);
+        gt.setMaxLength(60);
+        new GedcomUnconcatenator(gt).unconcatenate();
+        final BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(FileDescriptor.out));
+        Gedcom.writeFile(gt, out);
         out.flush();
         out.close();
 
@@ -875,7 +876,7 @@ end
         if (mapRemapIds.containsKey(b)) {
             b = mapRemapIds.get(b);
         }
-        return "F."+a+"."+b;
+        return "F_"+a+"_"+b;
     }
     private static void fixCharset(TreeNode<GedcomLine> root) {
         for (final TreeNode<GedcomLine> node : root) {
@@ -1118,6 +1119,7 @@ end
             if (tag.equals(GedcomTag.INDI)) {
                 node.sort((node1, node2) -> {
                     int c = 0;
+                    // TODO: We really should NOT change the order of multiple BIRT or DEAT records.
                     final Event event1 = loader.lookUpEvent(node1);
                     final Event event2 = loader.lookUpEvent(node2);
                     if (event1 == null && event2 == null) {
@@ -1342,7 +1344,7 @@ end
                 } else if (tagString.equals("_FACE")) {
                     node.setObject(new GedcomLine(gedcomLine.getLevel(), "@"+gedcomLine.getID()+"@", GedcomTag.EVEN.name(), ""));
                     final TreeNode<GedcomLine> existingFirstChild = node.children().hasNext() ? node.children().next() : null;
-                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "military")),existingFirstChild);
+                    node.addChildBefore(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel()+1, "", GedcomTag.TYPE.name(), "facebook")),existingFirstChild);
                     final String note = gedcomLine.getValue();
                     if (!note.isEmpty()) {
                         node.addChild(new TreeNode<GedcomLine>(new GedcomLine(gedcomLine.getLevel() + 1, "", GedcomTag.NOTE.name(), note)));
